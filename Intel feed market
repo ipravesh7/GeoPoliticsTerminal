@@ -1,0 +1,313 @@
+"""
+Geopolitical Intelligence Feed - Market Impact Scoring
+Real-time OSINT aggregation with global/crypto/commodities market impact analysis
+"""
+
+import asyncio
+import json
+from datetime import datetime
+from typing import List, Dict, Optional, Tuple
+from dataclasses import dataclass, asdict
+from enum import Enum
+import aiohttp
+from collections import defaultdict
+
+class SourceType(Enum):
+    TELEGRAM_OSINT = "telegram_osint"
+    WIRE_SERVICE = "wire_service"
+    ISW_ASSESSMENT = "isw_assessment"
+    OFFICIAL_LEADER = "official_leader"
+
+@dataclass
+class MarketImpact:
+    """Market impact scores for different asset classes"""
+    global_markets: float  # 0-10 scale
+    crypto_markets: float  # 0-10 scale
+    commodities: float     # 0-10 scale
+    
+    def overall_score(self) -> float:
+        """Calculate overall impact score"""
+        return (self.global_markets + self.crypto_markets + self.commodities) / 3
+    
+    def max_impact(self) -> Tuple[str, float]:
+        """Return the market with highest impact"""
+        impacts = {
+            'global': self.global_markets,
+            'crypto': self.crypto_markets,
+            'commodities': self.commodities
+        }
+        max_market = max(impacts.items(), key=lambda x: x[1])
+        return max_market
+
+@dataclass
+class IntelItem:
+    """Intelligence item with market impact analysis"""
+    id: str
+    timestamp: datetime
+    source_type: SourceType
+    source_name: str
+    title: str
+    content: str
+    url: Optional[str]
+    entities: List[str]
+    keywords: List[str]
+    market_impact: MarketImpact
+    sentiment: float  # -1 to 1
+    
+    def to_dict(self):
+        return {
+            **asdict(self),
+            'timestamp': self.timestamp.isoformat(),
+            'source_type': self.source_type.value,
+            'market_impact': {
+                'global_markets': self.market_impact.global_markets,
+                'crypto_markets': self.market_impact.crypto_markets,
+                'commodities': self.market_impact.commodities,
+                'overall': self.market_impact.overall_score()
+            }
+        }
+
+class MarketImpactAnalyzer:
+    """Analyzes intelligence for market impact"""
+    
+    def __init__(self):
+        self._build_impact_rules()
+    
+    def _build_impact_rules(self):
+        """Define market impact rules"""
+        self.global_market_keywords = {
+            'critical': ['war declared', 'invasion', 'nuclear', 'coup', 'central bank', 'fed', 'interest rate'],
+            'high': ['sanctions package', 'military action', 'trade war', 'debt ceiling', 'recession'],
+            'medium': ['tensions', 'tariff', 'export ban', 'inflation', 'gdp'],
+            'low': ['diplomatic', 'talks', 'summit', 'bilateral']
+        }
+        
+        self.crypto_market_keywords = {
+            'critical': ['regulation ban', 'exchange hack', 'sec lawsuit', 'mining ban'],
+            'high': ['regulatory', 'etf approval', 'institutional adoption', 'cbdc', 'stablecoin'],
+            'medium': ['crypto exchange', 'bitcoin', 'ethereum', 'defi', 'blockchain'],
+            'low': ['nft', 'web3', 'metaverse']
+        }
+        
+        self.commodities_keywords = {
+            'critical': ['opec cut', 'embargo', 'export ban', 'pipeline sabotage', 'grain corridor'],
+            'high': ['oil production', 'wheat export', 'gas pipeline', 'supply chain', 'natural gas'],
+            'medium': ['commodities', 'agriculture', 'mining', 'lithium', 'copper'],
+            'low': ['forecast', 'production estimate']
+        }
+        
+        # Geopolitical events that heavily impact markets
+        self.high_impact_entities = {
+            'global': ['usa', 'china', 'russia', 'european union', 'fed', 'ecb', 'g7', 'opec'],
+            'crypto': ['sec', 'binance', 'coinbase', 'ftx', 'tether', 'bitcoin'],
+            'commodities': ['russia', 'ukraine', 'opec', 'saudi arabia', 'iran', 'china']
+        }
+    
+    def analyze(self, content: str, entities: List[str], keywords: List[str]) -> MarketImpact:
+        """Analyze content for market impact across asset classes"""
+        content_lower = content.lower()
+        
+        # Calculate impact scores (0-10 scale)
+        global_score = self._calculate_market_score(
+            content_lower, entities, self.global_market_keywords, 
+            self.high_impact_entities['global']
+        )
+        
+        crypto_score = self._calculate_market_score(
+            content_lower, entities, self.crypto_market_keywords,
+            self.high_impact_entities['crypto']
+        )
+        
+        commodities_score = self._calculate_market_score(
+            content_lower, entities, self.commodities_keywords,
+            self.high_impact_entities['commodities']
+        )
+        
+        return MarketImpact(
+            global_markets=global_score,
+            crypto_markets=crypto_score,
+            commodities=commodities_score
+        )
+    
+    def _calculate_market_score(self, content: str, entities: List[str], 
+                                keyword_rules: Dict, high_impact_entities: List[str]) -> float:
+        """Calculate market impact score for specific market"""
+        score = 0.0
+        
+        # Check keyword severity
+        if any(kw in content for kw in keyword_rules.get('critical', [])):
+            score += 8.0
+        elif any(kw in content for kw in keyword_rules.get('high', [])):
+            score += 6.0
+        elif any(kw in content for kw in keyword_rules.get('medium', [])):
+            score += 4.0
+        elif any(kw in content for kw in keyword_rules.get('low', [])):
+            score += 2.0
+        
+        # Boost score if high-impact entities are involved
+        entity_boost = sum(2.0 for entity in entities 
+                          if entity.lower() in high_impact_entities)
+        score = min(10.0, score + entity_boost)
+        
+        # Severity multipliers based on specific phrases
+        if 'emergency' in content or 'breaking' in content:
+            score *= 1.2
+        if 'immediate' in content or 'urgent' in content:
+            score *= 1.1
+        
+        return min(10.0, score)
+
+class EntityExtractor:
+    """Extract entities from text"""
+    
+    def extract(self, text: str) -> List[str]:
+        """Extract named entities"""
+        entities = []
+        
+        # Key entities to track
+        countries = [
+            "Russia", "Ukraine", "China", "USA", "Iran", "Israel", "Taiwan",
+            "North Korea", "South Korea", "Syria", "Turkey", "Saudi Arabia",
+            "India", "Pakistan", "Japan", "Germany", "France", "UK"
+        ]
+        
+        organizations = [
+            "OPEC", "NATO", "UN", "IMF", "World Bank", "Fed", "ECB",
+            "WTO", "G7", "G20", "BRICS", "EU", "SEC", "CFTC"
+        ]
+        
+        crypto_entities = [
+            "Bitcoin", "Ethereum", "Binance", "Coinbase", "Tether",
+            "FTX", "Ripple", "Solana"
+        ]
+        
+        all_entities = countries + organizations + crypto_entities
+        
+        for entity in all_entities:
+            if entity.lower() in text.lower():
+                entities.append(entity)
+        
+        return list(set(entities))
+
+class IntelligenceFeed:
+    """Main intelligence feed with market impact analysis"""
+    
+    def __init__(self, config: Dict):
+        self.config = config
+        self.impact_analyzer = MarketImpactAnalyzer()
+        self.entity_extractor = EntityExtractor()
+        self.items: List[IntelItem] = []
+        self.last_update = datetime.utcnow()
+    
+    async def fetch_all_sources(self) -> List[IntelItem]:
+        """Fetch from all sources and analyze market impact"""
+        # In production, this would fetch from real sources
+        # For now, return mock data for demonstration
+        return []
+    
+    def _process_item(self, raw_data: Dict) -> IntelItem:
+        """Process raw data into IntelItem with market impact"""
+        content = raw_data.get('text', '')
+        entities = self.entity_extractor.extract(content)
+        keywords = self._extract_keywords(content)
+        
+        # Analyze market impact
+        market_impact = self.impact_analyzer.analyze(content, entities, keywords)
+        
+        item = IntelItem(
+            id=raw_data.get('id'),
+            timestamp=raw_data.get('timestamp', datetime.utcnow()),
+            source_type=SourceType(raw_data.get('source_type', 'telegram_osint')),
+            source_name=raw_data.get('source_name', ''),
+            title=content[:100] + "..." if len(content) > 100 else content,
+            content=content,
+            url=raw_data.get('url'),
+            entities=entities,
+            keywords=keywords,
+            market_impact=market_impact,
+            sentiment=self._analyze_sentiment(content)
+        )
+        
+        return item
+    
+    def _extract_keywords(self, text: str) -> List[str]:
+        """Extract relevant keywords"""
+        all_keywords = [
+            "military", "sanctions", "war", "conflict", "peace", "nuclear",
+            "oil", "gas", "wheat", "commodities", "trade", "export", "import",
+            "crypto", "bitcoin", "regulation", "ban", "approval",
+            "fed", "interest rate", "inflation", "recession", "gdp",
+            "strike", "attack", "invasion", "coup", "election"
+        ]
+        
+        return [kw for kw in all_keywords if kw in text.lower()]
+    
+    def _analyze_sentiment(self, text: str) -> float:
+        """Analyze sentiment (-1 to 1)"""
+        positive_words = ["peace", "agreement", "cooperation", "growth", "recovery"]
+        negative_words = ["war", "conflict", "crisis", "collapse", "threat", "strike"]
+        
+        text_lower = text.lower()
+        pos_count = sum(1 for word in positive_words if word in text_lower)
+        neg_count = sum(1 for word in negative_words if word in text_lower)
+        
+        if pos_count + neg_count == 0:
+            return 0.0
+        
+        return (pos_count - neg_count) / (pos_count + neg_count)
+
+# Generate mock data for frontend
+def generate_mock_data() -> List[Dict]:
+    """Generate realistic mock intelligence data"""
+    feed = IntelligenceFeed({})
+    
+    mock_items = [
+        {
+            'id': '1',
+            'timestamp': datetime.now(),
+            'source_type': 'wire_service',
+            'source_name': 'Bloomberg',
+            'text': 'OPEC+ announces emergency meeting to discuss production cuts amid falling oil prices. Saudi Arabia and Russia coordinate response to market volatility.',
+            'url': 'https://bloomberg.com/opec-emergency'
+        },
+        {
+            'id': '2',
+            'timestamp': datetime.now(),
+            'source_type': 'telegram_osint',
+            'source_name': 'Rybar EN',
+            'text': 'Russian forces conduct large-scale military exercises near Ukraine border. NATO increases surveillance flights in eastern Europe.',
+            'url': 'https://t.me/rybar_en/123'
+        },
+        {
+            'id': '3',
+            'timestamp': datetime.now(),
+            'source_type': 'official_leader',
+            'source_name': '@SECGov',
+            'text': 'SEC announces new regulatory framework for cryptocurrency exchanges. Major implications for Binance and Coinbase operations.',
+            'url': 'https://twitter.com/SECGov/status/123'
+        },
+        {
+            'id': '4',
+            'timestamp': datetime.now(),
+            'source_type': 'wire_service',
+            'source_name': 'Reuters',
+            'text': 'China announces stimulus package worth $1.4 trillion to boost economy. Focus on infrastructure and technology sectors.',
+            'url': 'https://reuters.com/china-stimulus'
+        },
+        {
+            'id': '5',
+            'timestamp': datetime.now(),
+            'source_type': 'isw_assessment',
+            'source_name': 'ISW Assessment',
+            'text': 'Ukraine successfully strikes Russian ammunition depot in Crimea. Significant impact on Russian logistics in southern sector.',
+            'url': 'https://understandingwar.org/assessment'
+        }
+    ]
+    
+    processed_items = [feed._process_item(item) for item in mock_items]
+    return [item.to_dict() for item in processed_items]
+
+if __name__ == "__main__":
+    # Generate and print sample data
+    mock_data = generate_mock_data()
+    print(json.dumps(mock_data, indent=2, default=str))
