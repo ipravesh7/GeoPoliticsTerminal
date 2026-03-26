@@ -1,0 +1,239 @@
+"""
+FastAPI WebSocket server for real-time intelligence feed
+Streams market impact data to terminal interface
+"""
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+import asyncio
+import json
+from datetime import datetime
+from typing import List, Set
+from intel_feed_market_impact import IntelligenceFeed, generate_mock_data
+
+app = FastAPI(title="GEOINT Terminal API")
+
+# Enable CORS for React frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, specify your frontend URL
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Active WebSocket connections
+active_connections: Set[WebSocket] = set()
+
+# In-memory intelligence feed
+intelligence_feed = IntelligenceFeed({})
+feed_items = []
+
+class ConnectionManager:
+    """Manage WebSocket connections"""
+    
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+    
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+        print(f"Client connected. Total connections: {len(self.active_connections)}")
+    
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+        print(f"Client disconnected. Total connections: {len(self.active_connections)}")
+    
+    async def broadcast(self, message: dict):
+        """Send message to all connected clients"""
+        disconnected = []
+        for connection in self.active_connections:
+            try:
+                await connection.send_json(message)
+            except Exception as e:
+                print(f"Error sending to client: {e}")
+                disconnected.append(connection)
+        
+        # Remove disconnected clients
+        for conn in disconnected:
+            if conn in self.active_connections:
+                self.active_connections.remove(conn)
+
+manager = ConnectionManager()
+
+@app.get("/")
+async def root():
+    """API health check"""
+    return {
+        "service": "GEOINT Terminal API",
+        "version": "2.1.4",
+        "status": "operational",
+        "active_connections": len(manager.active_connections),
+        "feed_items": len(feed_items),
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+@app.get("/api/feed")
+async def get_feed(limit: int = 50, source_type: str = None, min_impact: float = 0.0):
+    """Get recent intelligence feed items"""
+    filtered = feed_items
+    
+    if source_type and source_type != 'all':
+        filtered = [item for item in filtered if item.get('source_type') == source_type]
+    
+    if min_impact > 0:
+        filtered = [item for item in filtered 
+                   if item.get('market_impact', {}).get('overall', 0) >= min_impact]
+    
+    return {
+        "items": filtered[:limit],
+        "total": len(filtered),
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+@app.get("/api/market-stats")
+async def get_market_stats():
+    """Get aggregated market impact statistics"""
+    if not feed_items:
+        return {
+            "global_markets": 0,
+            "crypto_markets": 0,
+            "commodities": 0,
+            "total_items": 0
+        }
+    
+    global_avg = sum(item.get('market_impact', {}).get('global_markets', 0) 
+                     for item in feed_items) / len(feed_items)
+    crypto_avg = sum(item.get('market_impact', {}).get('crypto_markets', 0) 
+                     for item in feed_items) / len(feed_items)
+    commodities_avg = sum(item.get('market_impact', {}).get('commodities', 0) 
+                          for item in feed_items) / len(feed_items)
+    
+    # Count high-impact items per market
+    high_impact_threshold = 6.0
+    high_global = sum(1 for item in feed_items 
+                     if item.get('market_impact', {}).get('global_markets', 0) >= high_impact_threshold)
+    high_crypto = sum(1 for item in feed_items 
+                     if item.get('market_impact', {}).get('crypto_markets', 0) >= high_impact_threshold)
+    high_commodities = sum(1 for item in feed_items 
+                          if item.get('market_impact', {}).get('commodities', 0) >= high_impact_threshold)
+    
+    return {
+        "averages": {
+            "global_markets": round(global_avg, 2),
+            "crypto_markets": round(crypto_avg, 2),
+            "commodities": round(commodities_avg, 2)
+        },
+        "high_impact_count": {
+            "global_markets": high_global,
+            "crypto_markets": high_crypto,
+            "commodities": high_commodities
+        },
+        "total_items": len(feed_items),
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+@app.get("/api/sources")
+async def get_sources():
+    """Get active source statistics"""
+    source_counts = {}
+    for item in feed_items:
+        source_type = item.get('source_type', 'unknown')
+        source_counts[source_type] = source_counts.get(source_type, 0) + 1
+    
+    return {
+        "sources": source_counts,
+        "total_sources": len(source_counts),
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+@app.websocket("/ws/feed")
+async def websocket_feed(websocket: WebSocket):
+    """WebSocket endpoint for real-time feed updates"""
+    await manager.connect(websocket)
+    
+    try:
+        # Send initial feed data
+        await websocket.send_json({
+            "type": "initial_feed",
+            "items": feed_items[:50],
+            "timestamp": datetime.utcnow().isoformat()
+        })
+        
+        # Keep connection alive and listen for client messages
+        while True:
+            data = await websocket.receive_text()
+            # Client can send filter preferences, etc.
+            print(f"Received from client: {data}")
+            
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+        manager.disconnect(websocket)
+
+async def generate_feed_updates():
+    """Background task to generate and broadcast new intelligence items"""
+    global feed_items
+    
+    # Load initial mock data
+    feed_items = generate_mock_data()
+    
+    while True:
+        await asyncio.sleep(20)  # New item every 20 seconds
+        
+        # Generate new mock item
+        new_item = generate_mock_data()[0]  # Get first item from mock data
+        feed_items.insert(0, new_item)  # Add to front
+        feed_items = feed_items[:100]  # Keep last 100 items
+        
+        # Broadcast to all connected clients
+        await manager.broadcast({
+            "type": "new_item",
+            "item": new_item,
+            "timestamp": datetime.utcnow().isoformat()
+        })
+        
+        print(f"Broadcasted new item to {len(manager.active_connections)} clients")
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize feed on startup"""
+    print("GEOINT Terminal API starting...")
+    print("Loading initial intelligence data...")
+    
+    # Start background task for feed updates
+    asyncio.create_task(generate_feed_updates())
+    
+    print("✓ API ready")
+    print("✓ WebSocket endpoint: ws://localhost:8000/ws/feed")
+    print("✓ REST endpoints: http://localhost:8000/api/...")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown"""
+    print("GEOINT Terminal API shutting down...")
+
+if __name__ == "__main__":
+    import uvicorn
+    
+    print("""
+╔═══════════════════════════════════════════════════════════╗
+║                                                           ║
+║   GEOINT TERMINAL - API SERVER                           ║
+║   Geopolitical Intelligence Monitoring System            ║
+║                                                           ║
+║   WebSocket: ws://localhost:8000/ws/feed                 ║
+║   REST API:  http://localhost:8000/api/feed              ║
+║   Docs:      http://localhost:8000/docs                  ║
+║                                                           ║
+╚═══════════════════════════════════════════════════════════╝
+    """)
+    
+    uvicorn.run(
+        "api_server:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="info"
+    )
